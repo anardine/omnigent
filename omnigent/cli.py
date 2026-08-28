@@ -10520,13 +10520,38 @@ def debug_db_upgrade(url: str) -> None:
     before running migrations.
     """
     from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
 
     from omnigent.db.utils import _run_migrations
+
+    # db-upgrade operates on an *existing* database. A SQLite URL whose
+    # file is absent is almost always a wrong path: SQLite would either
+    # create an empty file to "upgrade", or — when the parent dir is
+    # missing — fail with the opaque "unable to open database file".
+    # Fail early with the path so the operator can correct it.
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and parsed.database and parsed.database != ":memory:":
+        db_file = Path(parsed.database)
+        if not db_file.exists():
+            detail = (
+                f" Its parent directory {str(db_file.parent)!r} does not exist."
+                if not db_file.parent.exists()
+                else ""
+            )
+            raise click.ClickException(
+                f"No SQLite database found at {str(db_file)!r}.{detail} "
+                f"db-upgrade upgrades an existing database — check the path."
+            )
 
     click.echo(f"Upgrading {url} ...")
     engine = create_engine(url)
     try:
         _run_migrations(engine, url)
+    except RuntimeError as exc:
+        # _run_migrations rejects a database written by a newer build (a
+        # revision this install doesn't ship). Surface it as a clean CLI
+        # error rather than an unhandled traceback.
+        raise click.ClickException(str(exc)) from exc
     finally:
         engine.dispose()
     click.echo("Upgrade complete.")
